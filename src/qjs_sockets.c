@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/epoll.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
+#define MAX_EVENTS 1024
 
 // Socket constants
 static const JSCFunctionListEntry js_socket_constants[] = {
@@ -31,7 +33,99 @@ static const JSCFunctionListEntry js_socket_constants[] = {
   JS_PROP_INT32_DEF("SHUT_RD", SHUT_RD, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SHUT_WR", SHUT_WR, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SHUT_RDWR", SHUT_RDWR, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("O_NONBLOCK", O_NONBLOCK, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLIN", EPOLLIN, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLOUT", EPOLLOUT, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLERR", EPOLLERR, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLHUP", EPOLLHUP, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLET", EPOLLET, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLONESHOT", EPOLLONESHOT, JS_PROP_CONFIGURABLE),
 };
+
+// setnonblocking(fd)
+static JSValue js_setnonblocking(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  int fd;
+  
+  if (JS_ToInt32(ctx, &fd, argv[0]))
+    return JS_EXCEPTION;
+  
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0)
+    return JS_ThrowInternalError(ctx, "fcntl(F_GETFL) failed: %s", strerror(errno));
+  
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    return JS_ThrowInternalError(ctx, "fcntl(F_SETFL) failed: %s", strerror(errno));
+  
+  return JS_NewInt32(ctx, 0);
+}
+
+// epoll_create1(flags)
+static JSValue js_epoll_create1(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  int flags = 0;
+  
+  if (argc > 0 && JS_ToInt32(ctx, &flags, argv[0]))
+    return JS_EXCEPTION;
+  
+  int epfd = epoll_create1(flags);
+  if (epfd < 0)
+    return JS_ThrowInternalError(ctx, "epoll_create1() failed: %s", strerror(errno));
+  
+  return JS_NewInt32(ctx, epfd);
+}
+
+// epoll_ctl(epfd, op, fd, events)
+static JSValue js_epoll_ctl(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  int epfd, op, fd, events;
+  
+  if (JS_ToInt32(ctx, &epfd, argv[0]))
+    return JS_EXCEPTION;
+  if (JS_ToInt32(ctx, &op, argv[1]))
+    return JS_EXCEPTION;
+  if (JS_ToInt32(ctx, &fd, argv[2]))
+    return JS_EXCEPTION;
+  if (JS_ToInt32(ctx, &events, argv[3]))
+    return JS_EXCEPTION;
+  
+  struct epoll_event ev;
+  ev.events = events;
+  ev.data.fd = fd;
+  
+  if (epoll_ctl(epfd, op, fd, &ev) < 0)
+    return JS_ThrowInternalError(ctx, "epoll_ctl() failed: %s", strerror(errno));
+  
+  return JS_NewInt32(ctx, 0);
+}
+
+// epoll_wait(epfd, maxevents, timeout) -> array of {fd, events}
+static JSValue js_epoll_wait(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  int epfd, maxevents, timeout = -1;
+  
+  if (JS_ToInt32(ctx, &epfd, argv[0]))
+    return JS_EXCEPTION;
+  if (JS_ToInt32(ctx, &maxevents, argv[1]))
+    return JS_EXCEPTION;
+  if (argc > 2 && JS_ToInt32(ctx, &timeout, argv[2]))
+    return JS_EXCEPTION;
+  
+  if (maxevents > MAX_EVENTS)
+    maxevents = MAX_EVENTS;
+  
+  struct epoll_event events[MAX_EVENTS];
+  int nfds = epoll_wait(epfd, events, maxevents, timeout);
+  
+  if (nfds < 0)
+    return JS_ThrowInternalError(ctx, "epoll_wait() failed: %s", strerror(errno));
+  
+  JSValue result = JS_NewArray(ctx);
+  for (int i = 0; i < nfds; i++) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "fd", JS_NewInt32(ctx, events[i].data.fd));
+    JS_SetPropertyStr(ctx, obj, "events", JS_NewUint32(ctx, events[i].events));
+    JS_SetPropertyUint32(ctx, result, i, obj);
+  }
+  
+  return result;
+}
 
 // socket(domain, type, protocol)
 static JSValue js_socket(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -112,8 +206,11 @@ static JSValue js_accept(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     return JS_EXCEPTION;
 
   int client_fd = accept(sockfd, (struct sockaddr *)&sa, &len);
-  if (client_fd < 0)
+  if (client_fd < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return JS_NULL;
     return JS_ThrowInternalError(ctx, "accept() failed: %s", strerror(errno));
+  }
 
   char addr_str[INET_ADDRSTRLEN];
   inet_ntop(AF_INET, &sa.sin_addr, addr_str, sizeof(addr_str));
@@ -152,8 +249,10 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
   }
   JS_FreeCString(ctx, addr);
 
-  if (connect(sockfd, (struct sockaddr *)&sa, sizeof(sa)) < 0)
-    return JS_ThrowInternalError(ctx, "connect() failed: %s", strerror(errno));
+  if (connect(sockfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+    if (errno != EINPROGRESS)
+      return JS_ThrowInternalError(ctx, "connect() failed: %s", strerror(errno));
+  }
 
   return JS_NewInt32(ctx, 0);
 }
@@ -180,11 +279,14 @@ static JSValue js_send(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     return JS_EXCEPTION;
   }
 
-  ssize_t sent = send(sockfd, data, len, flags);
+  ssize_t sent = send(sockfd, data, len, flags | MSG_NOSIGNAL);
   JS_FreeCString(ctx, data);
 
-  if (sent < 0)
+  if (sent < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return JS_NewInt32(ctx, 0);
     return JS_ThrowInternalError(ctx, "send() failed: %s", strerror(errno));
+  }
 
   return JS_NewInt32(ctx, sent);
 }
@@ -208,6 +310,8 @@ static JSValue js_recv(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
 
   if (received < 0) {
     free(buf);
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return JS_NewStringLen(ctx, "", 0);
     return JS_ThrowInternalError(ctx, "recv() failed: %s", strerror(errno));
   }
 
@@ -292,6 +396,13 @@ static const JSCFunctionListEntry js_socket_funcs[] = {
   JS_CFUNC_DEF("setsockopt", 4, js_setsockopt),
   JS_CFUNC_DEF("shutdown", 2, js_shutdown),
   JS_CFUNC_DEF("gethostbyname", 1, js_gethostbyname),
+  JS_CFUNC_DEF("setnonblocking", 1, js_setnonblocking),
+  JS_CFUNC_DEF("epoll_create1", 1, js_epoll_create1),
+  JS_CFUNC_DEF("epoll_ctl", 4, js_epoll_ctl),
+  JS_CFUNC_DEF("epoll_wait", 3, js_epoll_wait),
+  JS_PROP_INT32_DEF("EPOLL_CTL_ADD", EPOLL_CTL_ADD, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLL_CTL_MOD", EPOLL_CTL_MOD, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLL_CTL_DEL", EPOLL_CTL_DEL, JS_PROP_CONFIGURABLE),
 };
 
 static int js_sockets_init(JSContext *ctx, JSModuleDef *m) {

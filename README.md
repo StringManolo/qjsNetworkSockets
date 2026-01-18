@@ -10,6 +10,20 @@ Native socket module for QuickJS with an optional Express-like HTTP framework. B
 - **Zero Dependencies**: Pure C module + vanilla QuickJS (no Node.js required)
 - **Express-like Framework**: High-level HTTP server with routing, middleware, and request parsing
 - **Minimal Footprint**: Compiled `.so` is ~15KB; entire stack fits in embedded environments
+- **High Performance**: Epoll-based event loop handles 10K+ concurrent connections efficiently
+
+---
+
+## Performance
+
+The async implementation with epoll achieves **~417 req/s** compared to Node.js Express at **~280 req/s** (49% faster) in standard benchmarks. The synchronous blocking version runs at ~356 req/s.
+
+**[View full benchmarks →](tests/benchmarks/AB.md)**
+
+Quick comparison (10K requests, 100 concurrent):
+- **Async qjsNetworkSockets**: 417 req/s, 239ms avg latency
+- **Node.js Express**: 280 req/s, 357ms avg latency
+- **Sync qjsNetworkSockets**: 356 req/s, 280ms avg latency
 
 ---
 
@@ -44,7 +58,7 @@ sockets.close(client.fd);
 sockets.close(serverFd);
 ```
 
-### Express-like HTTP Server
+### Express-like HTTP Server (Async with Epoll)
 
 ```javascript
 import express from './extra/express.js';
@@ -94,6 +108,17 @@ sockets.SO_REUSEADDR
 sockets.SO_KEEPALIVE
 sockets.TCP_NODELAY
 sockets.SHUT_RD / SHUT_WR / SHUT_RDWR
+
+// Epoll constants
+sockets.EPOLLIN
+sockets.EPOLLOUT
+sockets.EPOLLERR
+sockets.EPOLLHUP
+sockets.EPOLLET        // Edge-triggered mode
+sockets.EPOLLONESHOT
+sockets.EPOLL_CTL_ADD
+sockets.EPOLL_CTL_MOD
+sockets.EPOLL_CTL_DEL
 ```
 
 #### Functions
@@ -107,8 +132,8 @@ Binds socket to address/port. Use `"0.0.0.0"` or `""` for all interfaces.
 **`listen(fd, backlog) → 0`**
 Marks socket as passive for accepting connections.
 
-**`accept(fd) → {fd, address, port}`**
-Accepts incoming connection. Returns client object.
+**`accept(fd) → {fd, address, port} | null`**
+Accepts incoming connection. Returns client object or null if no connection available (non-blocking).
 
 **`connect(fd, address, port) → 0`**
 Connects to remote server.
@@ -131,6 +156,18 @@ Shuts down read/write halves.
 **`gethostbyname(hostname) → address`**
 Resolves hostname to IPv4 string.
 
+**`setnonblocking(fd) → 0`**
+Sets socket to non-blocking mode.
+
+**`epoll_create1(flags) → epfd`**
+Creates an epoll instance.
+
+**`epoll_ctl(epfd, op, fd, events) → 0`**
+Controls epoll instance (add/modify/delete file descriptors).
+
+**`epoll_wait(epfd, maxevents, timeout) → [{fd, events}, ...]`**
+Waits for events on the epoll instance. Returns array of event objects.
+
 ---
 
 ### Express-like Framework (`extra/express.js`)
@@ -140,7 +177,7 @@ Resolves hostname to IPv4 string.
 Creates application instance (extends Router).
 
 #### `app.listen(port, host='0.0.0.0', callback)`
-Starts synchronous server loop. Execution blocks here.
+Starts asynchronous server loop with epoll. Execution blocks here.
 
 #### `app.use([path], middleware)`
 Registers middleware function `(req, res, next) => {}`.
@@ -187,14 +224,16 @@ res.text(text)                      // Plain text
 ```
 qjsNetworkSockets/
 ├── compileSockets.sh      # Build script
-├── src/qjs_sockets.c      # Native C module
-├── extra/express.js       # Express-like framework
+├── src/qjs_sockets.c      # Native C module with epoll
+├── extra/express.js       # Express-like framework (async)
 ├── examples/
 │   ├── test.js           # Low-level TCP example
 │   └── testExpress.js    # Full REST API example
 ├── dist/
 │   └── network_sockets.so  # Compiled module
-└── tests/                # (empty) - add test suites
+└── tests/
+    └── benchmarks/
+        └── AB.md         # Apache Bench performance tests
 ```
 
 ---
@@ -203,16 +242,27 @@ qjsNetworkSockets/
 
 - **QuickJS** (header files auto-downloaded)
 - **GCC** with C99 support
-- **Linux** (or POSIX-compliant system)
+- **Linux** (or POSIX-compliant system with epoll)
 - **~5MB** disk space for build artifacts
 
 ---
 
 ## Advanced Usage
 
-### Non-blocking Sockets
+### Epoll Event Loop
 
-Set `O_NONBLOCK` flag via `fcntl()` (requires additional native binding).
+The Express framework uses epoll with edge-triggered mode for efficient I/O multiplexing:
+
+```javascript
+// Automatic in express.js, but you can use low-level API:
+const epfd = sockets.epoll_create1(0);
+sockets.epoll_ctl(epfd, sockets.EPOLL_CTL_ADD, fd, sockets.EPOLLIN);
+
+const events = sockets.epoll_wait(epfd, 256, 1000); // timeout in ms
+for (const event of events) {
+  console.log(`Event on fd ${event.fd}: ${event.events}`);
+}
+```
 
 ### HTTPS/TLS
 
@@ -242,17 +292,18 @@ try {
 - IPv6 not implemented (C code uses `sockaddr_in` only)
 - No streaming/chunked response support (`res.send()` buffers everything)
 - Binary data handling is string-based
-- Single-threaded synchronous loop (no `async/await`)
+- Single-threaded event loop (no multi-threading)
 - No built-in static file serving
+- Linux-only (epoll is not available on macOS/BSD)
 
 ### Planned Improvements
 - [ ] IPv6 support (`sockaddr_in6`)
 - [ ] Chunked encoding for large responses
 - [ ] `Uint8Array` binary support in `send()`/`recv()`
-- [ ] Epoll/kqueue async I/O integration
+- [ ] kqueue support for macOS/BSD
 - [ ] HTTPS via mbedtls or BearSSL
 - [ ] TypeScript definitions
-- [ ] Test suite with QuickJS assertions
+- [ ] Comprehensive test suite
 
 ---
 
@@ -264,9 +315,10 @@ MIT License - see `LICENSE` file.
 
 ## Contributing
 
-This is a minimal proof-of-concept. For production use, consider:
-- Adding proper buffering in `recv()` for incomplete HTTP packets
+This is a high-performance proof-of-concept. For production use, consider:
+- Adding proper buffering for incomplete HTTP packets
 - Implementing connection pooling
 - Creating Docker examples for embedded deployment
+- Adding benchmarking suite for regression testing
 
-Pull requests welcome.
+Pull requests are welcome.

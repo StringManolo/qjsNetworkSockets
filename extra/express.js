@@ -22,7 +22,6 @@ class Request {
     this.method = requestLine[0];
     this.url = requestLine[1];
 
-    // Parse path and query string
     const urlParts = this.url.split('?');
     this.path = urlParts[0];
 
@@ -34,7 +33,6 @@ class Request {
       }
     }
 
-    // Parse headers
     let i = 1;
     while (i < lines.length && lines[i] !== '') {
       const [key, ...valueParts] = lines[i].split(':');
@@ -44,7 +42,6 @@ class Request {
       i++;
     }
 
-    // Body is after the empty line
     if (i < lines.length - 1) {
       this.body = lines.slice(i + 1).join('\r\n');
     }
@@ -64,6 +61,7 @@ class Response {
       'Connection': 'close'
     };
     this.sent = false;
+    this._buffer = '';
   }
 
   status(code) {
@@ -109,23 +107,24 @@ class Response {
 
     response += '\r\n' + data;
 
-    sockets.send(this.clientFd, response, 0);
+    this._buffer = response;
     this.sent = true;
+    return response;
   }
 
   json(obj) {
     this.set('Content-Type', 'application/json; charset=utf-8');
-    this.send(JSON.stringify(obj));
+    return this.send(JSON.stringify(obj));
   }
 
   html(html) {
     this.set('Content-Type', 'text/html; charset=utf-8');
-    this.send(html);
+    return this.send(html);
   }
 
   text(text) {
     this.set('Content-Type', 'text/plain; charset=utf-8');
-    this.send(text);
+    return this.send(text);
   }
 }
 
@@ -186,7 +185,6 @@ class Router {
   }
 
   _matchPath(pattern, path) {
-    // Convert pattern with :params to regex
     const paramNames = [];
     const regexPattern = pattern.replace(/:([a-zA-Z0-9_]+)/g, (match, name) => {
       paramNames.push(name);
@@ -207,7 +205,6 @@ class Router {
   }
 
   _handleRequest(req, res) {
-    // Execute middlewares
     for (const mw of this.middlewares) {
       if (mw.path === null || req.path.startsWith(mw.path)) {
         let nextCalled = false;
@@ -219,7 +216,6 @@ class Router {
       }
     }
 
-    // Find and execute route
     const match = this._matchRoute(req.method, req.path);
 
     if (match) {
@@ -235,67 +231,152 @@ class Express extends Router {
   constructor() {
     super();
     this.serverFd = null;
+    this.epollFd = null;
+    this.clients = new Map();
   }
 
   listen(port, host = '0.0.0.0', callback) {
     this.serverFd = sockets.socket(sockets.AF_INET, sockets.SOCK_STREAM, 0);
 
-    // Allow address reuse
     sockets.setsockopt(this.serverFd, sockets.SOL_SOCKET, sockets.SO_REUSEADDR, 1);
-
     sockets.bind(this.serverFd, host, port);
-    sockets.listen(this.serverFd, 128);
+    sockets.listen(this.serverFd, 1024);
+    sockets.setnonblocking(this.serverFd);
 
-    if (callback) callback();
+    // Crear epoll
+    this.epollFd = sockets.epoll_create1(0);
+    
+    // Agregar servidor al epoll
+    sockets.epoll_ctl(
+      this.epollFd,
+      sockets.EPOLL_CTL_ADD,
+      this.serverFd,
+      sockets.EPOLLIN | sockets.EPOLLET
+    );
 
-    console.log(`Server listening on ${host}:${port}`);
+    if (typeof callback === 'function') {
+      callback();
+    }
 
-    // Main event loop
+    // Event loop con epoll
     while (true) {
       try {
-        const client = sockets.accept(this.serverFd);
-        this._handleClient(client);
+        const events = sockets.epoll_wait(this.epollFd, 256, 1000);
+        
+        for (const event of events) {
+          if (event.fd === this.serverFd) {
+            // Nueva conexión
+            this._acceptConnections();
+          } else {
+            // Datos de cliente
+            this._handleClientEvent(event);
+          }
+        }
       } catch (e) {
-        console.error('Error accepting client:', e);
+        // console.log('Event loop error:', e);
       }
     }
   }
 
-  _handleClient(clientInfo) {
-    try {
-      // Read request
-      const data = sockets.recv(clientInfo.fd, 8192, 0);
-
-      if (data.length === 0) {
-        sockets.close(clientInfo.fd);
-        return;
-      }
-
-      const req = new Request(data, clientInfo);
-      const res = new Response(clientInfo.fd);
-
-      // Process request synchronously
+  _acceptConnections() {
+    // Aceptar todas las conexiones pendientes
+    while (true) {
       try {
-        this._handleRequest(req, res);
-      } catch (err) {
-        console.error('Error processing request:', err);
-        if (!res.sent) {
-          res.status(500).send('Internal Server Error');
+        const client = sockets.accept(this.serverFd);
+        if (!client) break; // No hay más conexiones
+
+        // Configurar socket del cliente
+        sockets.setnonblocking(client.fd);
+        sockets.setsockopt(client.fd, sockets.IPPROTO_TCP, sockets.TCP_NODELAY, 1);
+
+        // Agregar cliente al epoll
+        sockets.epoll_ctl(
+          this.epollFd,
+          sockets.EPOLL_CTL_ADD,
+          client.fd,
+          sockets.EPOLLIN | sockets.EPOLLET
+        );
+
+        // Guardar info del cliente
+        this.clients.set(client.fd, {
+          info: client,
+          buffer: '',
+          responseBuffer: ''
+        });
+      } catch (e) {
+        break;
+      }
+    }
+  }
+
+  _handleClientEvent(event) {
+    const clientData = this.clients.get(event.fd);
+    if (!clientData) return;
+
+    try {
+      // Leer todos los datos disponibles
+      while (true) {
+        const chunk = sockets.recv(event.fd, 8192, 0);
+        if (!chunk || chunk.length === 0) break;
+        
+        clientData.buffer += chunk;
+        
+        // Si ya tenemos una petición HTTP completa
+        if (clientData.buffer.includes('\r\n\r\n')) {
+          this._processRequest(event.fd, clientData);
+          break;
         }
       }
 
-      // Close connection immediately after sending
-      sockets.close(clientInfo.fd);
-
+      // Si hay error o cierre
+      if (event.events & (sockets.EPOLLERR | sockets.EPOLLHUP)) {
+        this._closeClient(event.fd);
+      }
     } catch (e) {
-      console.error('Error handling client:', e);
-      try {
-        sockets.close(clientInfo.fd);
-      } catch (e2) {}
+      this._closeClient(event.fd);
+    }
+  }
+
+  _processRequest(fd, clientData) {
+    try {
+      const req = new Request(clientData.buffer, clientData.info);
+      const res = new Response(fd);
+
+      this._handleRequest(req, res);
+
+      if (res.sent && res._buffer) {
+        // Enviar respuesta
+        const data = res._buffer;
+        let sent = 0;
+        
+        while (sent < data.length) {
+          const n = sockets.send(fd, data.slice(sent), 0);
+          if (n <= 0) break;
+          sent += n;
+        }
+      }
+    } catch (e) {
+      // console.log('Error processing:', e);
+    } finally {
+      this._closeClient(fd);
+    }
+  }
+
+  _closeClient(fd) {
+    try {
+      sockets.epoll_ctl(this.epollFd, sockets.EPOLL_CTL_DEL, fd, 0);
+      sockets.close(fd);
+      this.clients.delete(fd);
+    } catch (e) {
+      // Ignore errors
     }
   }
 
   close() {
+    if (this.epollFd !== null) {
+      sockets.close(this.epollFd);
+      this.epollFd = null;
+    }
     if (this.serverFd !== null) {
       sockets.close(this.serverFd);
       this.serverFd = null;

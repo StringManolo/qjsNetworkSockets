@@ -10,7 +10,6 @@ Native socket module for QuickJS with an optional Express-like HTTP framework. B
 - **Zero Dependencies**: Pure C module + vanilla QuickJS (no Node.js required)
 - **Express-like Framework**: High-level HTTP server with routing, middleware, and request parsing
 - **Minimal Footprint**: Compiled `.so` is ~15KB; entire stack fits in embedded environments
-- **TypeScript Ready**: Includes type definitions and modern JS patterns
 
 ---
 
@@ -19,7 +18,7 @@ Native socket module for QuickJS with an optional Express-like HTTP framework. B
 ### Compilation
 
 ```bash
-# Clone and compile (requires gcc and QuickJS)
+# Clone and compile (requires gcc and curl)
 ./compileSockets.sh
 ```
 

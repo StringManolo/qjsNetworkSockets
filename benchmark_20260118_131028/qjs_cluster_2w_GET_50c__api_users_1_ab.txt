@@ -1,0 +1,54 @@
+This is ApacheBench, Version 2.3 <$Revision: 1923142 $>
+Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+Licensed to The Apache Software Foundation, http://www.apache.org/
+
+Benchmarking 127.0.0.1 (be patient)
+Completed 1000 requests
+Completed 2000 requests
+Completed 3000 requests
+Completed 4000 requests
+Completed 5000 requests
+Completed 6000 requests
+Completed 7000 requests
+Completed 8000 requests
+Completed 9000 requests
+Completed 10000 requests
+Finished 10000 requests
+
+
+Server Software:        qjs-express/1.0
+Server Hostname:        127.0.0.1
+Server Port:            8080
+
+Document Path:          /api/users/1
+Document Length:        49 bytes
+
+Concurrency Level:      50
+Time taken for tests:   4.188 seconds
+Complete requests:      10000
+Failed requests:        0
+Keep-Alive requests:    10000
+Total transferred:      2540000 bytes
+HTML transferred:       490000 bytes
+Requests per second:    2387.58 [#/sec] (mean)
+Time per request:       20.942 [ms] (mean)
+Time per request:       0.419 [ms] (mean, across all concurrent requests)
+Transfer rate:          592.23 [Kbytes/sec] received
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   4.4      0      89
+Processing:     1   20   5.0     21      93
+Waiting:        0   20   5.0     21      51
+Total:          1   21   6.7     21     109
+
+Percentage of the requests served within a certain time (ms)
+  50%     21
+  66%     21
+  75%     22
+  80%     22
+  90%     25
+  95%     27
+  98%     31
+  99%     38
+ 100%    109 (longest request)

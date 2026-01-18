@@ -50,3 +50,15 @@ app.delete('/api/users/:id', (req, res) => {
 });
 
 app.listen(8080);
+
+// Add health endpoint for benchmarking
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Add root endpoint
+app.get('/', (req, res) => {
+    res.status(404).json({ error: 'Not found', message: 'Try /api/users' });
+});
+
+console.log('Server with health endpoint starting on port 8080...');

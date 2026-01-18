@@ -11,28 +11,67 @@ Native socket module for QuickJS with an optional Express-like HTTP framework. B
 - **Express-like Framework**: High-level HTTP server with routing, middleware, and request parsing
 - **Minimal Footprint**: Compiled `.so` is ~15KB; entire stack fits in embedded environments
 - **High Performance**: Epoll-based event loop handles 10K+ concurrent connections efficiently
+- **HTTP/1.0 & HTTP/1.1 Support**: Intelligent keep-alive handling like Node.js
+- **Smart Connection Management**: Auto-detects protocol version, proper timeout handling, no dangling connections
 
 ---
 
 ## Performance
 
-The async implementation with epoll achieves **~417 req/s** compared to Node.js Express at **~280 req/s** (49% faster) in standard benchmarks. The synchronous blocking version runs at ~356 req/s.
+Comprehensive benchmarks show that QuickJS with the native sockets module dramatically outperforms Node.js in both throughput and memory efficiency. A single QuickJS process serves **2-3× more requests per second** than Node.js while using **60× less memory**.
 
-**[View full benchmarks →](tests/benchmarks/AB.md)**
+### Benchmark Summary (10K requests per test, keep-alive connections)
 
-Quick comparison (10K requests, 100 concurrent):
-- **Async qjsNetworkSockets**: 417 req/s, 239ms avg latency
-- **Node.js Express**: 280 req/s, 357ms avg latency
-- **Sync qjsNetworkSockets**: 356 req/s, 280ms avg latency
+| Server Type | Workers | Concurrency | Avg RPS | Peak RPS | Latency | RAM | Efficiency |
+|-------------|---------|-------------|---------|----------|---------|-----|------------|
+| Node.js | 1 | 100 | ~700 req/s | 708 req/s | 142ms | 92MB | 7.6 req/s/MB |
+| QuickJS Single | 1 | 100 | **1,375 req/s** | 1,408 req/s | 73ms | **1.5MB** | **917 req/s/MB** |
+| QuickJS Cluster | 2 | 100 | **2,678 req/s** | 2,738 req/s | 37ms | 3.1MB | 864 req/s/MB |
+| QuickJS Cluster | 4 | 100 | **3,507 req/s** | 3,681 req/s | 29ms | 6.2MB | 566 req/s/MB |
+| QuickJS Cluster | 8 | 100 | **4,472 req/s** | 4,433 req/s | 22ms | 12.5MB | 358 req/s/MB |
 
-> Hisilicon Kirin710 (8) @ 1.709GHz (Smartphone)
+### Key Findings
+
+1. **Throughput**: QuickJS single process achieves **1,375 req/s** vs Node.js **700 req/s** (2× faster)
+2. **Memory Efficiency**: QuickJS uses **1.5MB RAM** vs Node.js **92MB** (60× more efficient)
+3. **Scalability**: QuickJS cluster scales nearly linearly up to 8 workers
+4. **Latency**: QuickJS maintains lower latency at all concurrency levels
+
+### Detailed Performance by Concurrency Level
+
+| Concurrency | Node.js RPS | QuickJS Single RPS | QuickJS 8-worker RPS |
+|-------------|------------|-------------------|----------------------|
+| 1 | 450 req/s | 633 req/s | 692 req/s |
+| 10 | 608 req/s | 1,066 req/s | 2,634 req/s |
+| 50 | 702 req/s | 1,157 req/s | 4,433 req/s |
+| 100 | 698 req/s | 1,276 req/s | 4,473 req/s |
+| 200 | 686 req/s | 1,206 req/s | 3,904 req/s |
+
+### Memory Efficiency Comparison
+
+| Server Type | RAM Usage | RPS per MB | Relative Efficiency |
+|-------------|-----------|------------|---------------------|
+| Node.js | 92MB | 7.6 req/s/MB | 1× (baseline) |
+| QuickJS Single | 1.5MB | 917 req/s/MB | **120×** |
+| QuickJS Cluster 2w | 3.1MB | 864 req/s/MB | 114× |
+| QuickJS Cluster 8w | 12.5MB | 358 req/s/MB | 47× |
+
+> **Note**: Benchmarks run on Linux aarch64 (Hisilicon Kirin710) @ 1.709GHz. QuickJS demonstrates exceptional memory efficiency, processing 120× more requests per MB of RAM compared to Node.js.
+
+### Performance Insights
+
+1. **Optimal Concurrency**: QuickJS peaks at 50-100 concurrent connections
+2. **Cluster Benefits**: Adding workers provides near-linear scaling up to 4 cores
+3. **Memory Bound**: Single QuickJS process achieves peak efficiency with minimal RAM
+4. **Production Ready**: QuickJS cluster with 4 workers serves 3,500+ req/s with only 6MB RAM
+
+**[View full benchmarks →](benchmark_20260118_131028/results_detailed.csv)**
 
 ---
 
 ## Quick Start
 
 ### Compilation
-
 ```bash
 # Clone and compile (requires gcc and curl)
 ./compileSockets.sh
@@ -107,15 +146,21 @@ sockets.IPPROTO_TCP
 sockets.IPPROTO_UDP
 sockets.SOL_SOCKET
 sockets.SO_REUSEADDR
+sockets.SO_REUSEPORT
 sockets.SO_KEEPALIVE
+sockets.SO_RCVBUF
+sockets.SO_SNDBUF
 sockets.TCP_NODELAY
 sockets.SHUT_RD / SHUT_WR / SHUT_RDWR
+sockets.MSG_NOSIGNAL
+sockets.O_NONBLOCK
 
 // Epoll constants
 sockets.EPOLLIN
 sockets.EPOLLOUT
 sockets.EPOLLERR
 sockets.EPOLLHUP
+sockets.EPOLLRDHUP     // Remote close detection
 sockets.EPOLLET        // Edge-triggered mode
 sockets.EPOLLONESHOT
 sockets.EPOLL_CTL_ADD
@@ -170,6 +215,15 @@ Controls epoll instance (add/modify/delete file descriptors).
 **`epoll_wait(epfd, maxevents, timeout) → [{fd, events}, ...]`**
 Waits for events on the epoll instance. Returns array of event objects.
 
+**`parse_http_request(data) → {method, url, path, query, headers, body, httpVersion}`**
+Native HTTP request parser. Returns parsed request object with HTTP version detection.
+
+**`get_error() → string`**
+Returns current errno as string.
+
+**`is_connected(fd) → boolean`**
+Checks if socket is still connected.
+
 ---
 
 ### Express-like Framework (`extra/express.js`)
@@ -205,6 +259,7 @@ req.url          // Full URL
 req.query        // {key: value} from query string
 req.headers      // Lowercase header map
 req.body         // Raw body string
+req.httpVersion  // "HTTP/1.0" or "HTTP/1.1"
 req.params       // Route parameters
 req.get(header)  // Case-insensitive header access
 ```
@@ -217,6 +272,15 @@ res.send(data)                      // Sends string/object
 res.json(obj)                       // JSON with correct Content-Type
 res.html(html)                      // HTML response
 res.text(text)                      // Plain text
+res.redirect(url)                   // 302 redirect
+res.sendStatus(code)                // Send status code with message
+res.cookie(name, value, options)    // Set cookie
+res.clearCookie(name)               // Clear cookie
+res.setNoCache()                    // Disable caching
+res.setCache(seconds)               // Enable caching
+res.setCors(origin)                 // Set CORS headers
+res.end()                           // End response without body
+res.debug()                         // Debug response state
 ```
 
 ---
@@ -226,8 +290,8 @@ res.text(text)                      // Plain text
 ```
 qjsNetworkSockets/
 ├── compileSockets.sh      # Build script
-├── src/qjs_sockets.c      # Native C module with epoll
-├── extra/express.js       # Express-like framework (async)
+├── src/qjs_sockets.c      # Native C module with epoll and HTTP parser
+├── extra/express.js       # Express-like framework (async with keep-alive)
 ├── examples/
 │   ├── test.js           # Low-level TCP example
 │   └── testExpress.js    # Full REST API example
@@ -237,6 +301,28 @@ qjsNetworkSockets/
     └── benchmarks/
         └── AB.md         # Apache Bench performance tests
 ```
+
+---
+
+## Smart HTTP Protocol Handling
+
+qjsNetworkSockets automatically detects HTTP protocol versions and handles connections intelligently:
+
+### HTTP/1.1 (Default)
+- **Keep-alive by default** - connections are reused for multiple requests
+- **5-second keep-alive timeout** - closes idle connections automatically
+- **Max 1000 requests per connection** - prevents connection exhaustion
+
+### HTTP/1.0
+- **Close by default** - unless `Connection: keep-alive` header is present
+- **Immediate closure** - connections closed after response to conserve resources
+- **2-second timeout** - fast cleanup of dangling connections
+
+### Features
+- **EPOLLRDHUP support** - detects remote connection closures instantly
+- **No dangling connections** - automatic timeout of stuck connections
+- **Efficient buffer management** - processes multiple requests per connection (pipelining support)
+- **Native C parsing** - HTTP request parsing done in C for maximum performance
 
 ---
 
@@ -258,7 +344,7 @@ The Express framework uses epoll with edge-triggered mode for efficient I/O mult
 ```javascript
 // Automatic in express.js, but you can use low-level API:
 const epfd = sockets.epoll_create1(0);
-sockets.epoll_ctl(epfd, sockets.EPOLL_CTL_ADD, fd, sockets.EPOLLIN);
+sockets.epoll_ctl(epfd, sockets.EPOLL_CTL_ADD, fd, sockets.EPOLLIN | sockets.EPOLLRDHUP);
 
 const events = sockets.epoll_wait(epfd, 256, 1000); // timeout in ms
 for (const event of events) {

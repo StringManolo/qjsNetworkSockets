@@ -1,0 +1,31 @@
+BENCHMARK SUMMARY
+=================
+Date: Sun Jan 18 01:32:37 PM UTC 2026
+Machine: Linux localhost 6.17.0-PRoot-Distro #1 SMP PREEMPT_DYNAMIC Fri, 10 Oct 2025 00:00:00 +0000 aarch64 GNU/Linux
+
+TOP PERFORMERS:
+Server Type | Workers | Concurrency | RPS | Latency | RAM | Efficiency
+------------|---------|-------------|-----|---------|-----|-----------
+node | 1 | 100 | 695.5 | 143.8ms | 93.1MB | 7.4
+node | 1 | 100 | 700.1 | 142.8ms | 92.2MB | 7.5
+node | 1 | 10 | 604.3 | 16.5ms | 90.3MB | 6.6
+node | 1 | 10 | 613.5 | 16.3ms | 90.6MB | 6.7
+node | 1 | 1 | 449.2 | 2.2ms | 91.9MB | 4.8
+node | 1 | 1 | 450.7 | 2.2ms | 91.2MB | 4.9
+node | 1 | 200 | 683.5 | 292.6ms | 93.4MB | 7.3
+node | 1 | 200 | 688.6 | 290.5ms | 96.4MB | 7.1
+node | 1 | 50 | 694.7 | 72.0ms | 92.9MB | 7.4
+node | 1 | 50 | 708.7 | 70.6ms | 91.6MB | 7.7
+
+BEST MEMORY EFFICIENCY:
+qjs_cluster-1w-100c: 939.0 req/s/MB
+qjs_single-1w-100c: 917.1 req/s/MB
+qjs_cluster-2w-50c: 883.1 req/s/MB
+qjs_cluster-2w-100c: 864.0 req/s/MB
+qjs_cluster-2w-10c: 849.7 req/s/MB
+qjs_cluster-2w-200c: 833.3 req/s/MB
+qjs_cluster-1w-200c: 802.8 req/s/MB
+qjs_single-1w-50c: 789.8 req/s/MB
+qjs_cluster-1w-50c: 782.3 req/s/MB
+qjs_cluster-2w-50c: 770.1 req/s/MB
+

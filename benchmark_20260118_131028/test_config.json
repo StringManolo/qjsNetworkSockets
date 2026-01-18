@@ -1,0 +1,13 @@
+{
+    "timestamp": "Sun Jan 18 01:10:29 PM UTC 2026",
+    "machine_info": "Linux localhost 6.17.0-PRoot-Distro #1 SMP PREEMPT_DYNAMIC Fri, 10 Oct 2025 00:00:00 +0000 aarch64 GNU/Linux",
+    "server_host": "127.0.0.1",
+    "server_port": "8080",
+    "concurrency_levels": [1,10,50,100,200],
+    "total_requests": 10000,
+    "duration_seconds": 30,
+    "warmup_requests": 1000,
+    "endpoints": ["/api/users","/api/users/1","/api/users/2"],
+    "request_methods": ["GET","POST"],
+    "cluster_workers": [1,2,4,8]
+}

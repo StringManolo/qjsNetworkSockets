@@ -42,45 +42,47 @@ static const JSCFunctionListEntry js_socket_constants[] = {
   JS_PROP_INT32_DEF("EPOLLOUT", EPOLLOUT, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLLERR", EPOLLERR, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLLHUP", EPOLLHUP, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("EPOLLRDHUP", EPOLLRDHUP, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLLET", EPOLLET, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLLONESHOT", EPOLLONESHOT, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("MSG_NOSIGNAL", MSG_NOSIGNAL, JS_PROP_CONFIGURABLE),
 };
 
 // setnonblocking(fd)
 static JSValue js_setnonblocking(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   int fd;
-  
+
   if (JS_ToInt32(ctx, &fd, argv[0]))
     return JS_EXCEPTION;
-  
+
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0)
     return JS_ThrowInternalError(ctx, "fcntl(F_GETFL) failed: %s", strerror(errno));
-  
+
   if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
     return JS_ThrowInternalError(ctx, "fcntl(F_SETFL) failed: %s", strerror(errno));
-  
+
   return JS_NewInt32(ctx, 0);
 }
 
 // epoll_create1(flags)
 static JSValue js_epoll_create1(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   int flags = 0;
-  
+
   if (argc > 0 && JS_ToInt32(ctx, &flags, argv[0]))
     return JS_EXCEPTION;
-  
+
   int epfd = epoll_create1(flags);
   if (epfd < 0)
     return JS_ThrowInternalError(ctx, "epoll_create1() failed: %s", strerror(errno));
-  
+
   return JS_NewInt32(ctx, epfd);
 }
 
 // epoll_ctl(epfd, op, fd, events)
 static JSValue js_epoll_ctl(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   int epfd, op, fd, events;
-  
+
   if (JS_ToInt32(ctx, &epfd, argv[0]))
     return JS_EXCEPTION;
   if (JS_ToInt32(ctx, &op, argv[1]))
@@ -89,37 +91,37 @@ static JSValue js_epoll_ctl(JSContext *ctx, JSValueConst this_val, int argc, JSV
     return JS_EXCEPTION;
   if (JS_ToInt32(ctx, &events, argv[3]))
     return JS_EXCEPTION;
-  
+
   struct epoll_event ev;
   ev.events = events;
   ev.data.fd = fd;
-  
+
   if (epoll_ctl(epfd, op, fd, &ev) < 0)
     return JS_ThrowInternalError(ctx, "epoll_ctl() failed: %s", strerror(errno));
-  
+
   return JS_NewInt32(ctx, 0);
 }
 
 // epoll_wait(epfd, maxevents, timeout) -> array of {fd, events}
 static JSValue js_epoll_wait(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   int epfd, maxevents, timeout = -1;
-  
+
   if (JS_ToInt32(ctx, &epfd, argv[0]))
     return JS_EXCEPTION;
   if (JS_ToInt32(ctx, &maxevents, argv[1]))
     return JS_EXCEPTION;
   if (argc > 2 && JS_ToInt32(ctx, &timeout, argv[2]))
     return JS_EXCEPTION;
-  
+
   if (maxevents > MAX_EVENTS)
     maxevents = MAX_EVENTS;
-  
+
   struct epoll_event events[MAX_EVENTS];
   int nfds = epoll_wait(epfd, events, maxevents, timeout);
-  
+
   if (nfds < 0)
     return JS_ThrowInternalError(ctx, "epoll_wait() failed: %s", strerror(errno));
-  
+
   JSValue result = JS_NewArray(ctx);
   for (int i = 0; i < nfds; i++) {
     JSValue obj = JS_NewObject(ctx);
@@ -127,7 +129,7 @@ static JSValue js_epoll_wait(JSContext *ctx, JSValueConst this_val, int argc, JS
     JS_SetPropertyStr(ctx, obj, "events", JS_NewUint32(ctx, events[i].events));
     JS_SetPropertyUint32(ctx, result, i, obj);
   }
-  
+
   return result;
 }
 
@@ -306,6 +308,8 @@ static JSValue js_recv(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
   if (argc > 2 && JS_ToInt32(ctx, &flags, argv[2]))
     return JS_EXCEPTION;
 
+  if (bufsize > 65536) bufsize = 65536; // Limit to 64KB
+
   char *buf = malloc(bufsize);
   if (!buf)
     return JS_ThrowOutOfMemory(ctx);
@@ -321,7 +325,6 @@ static JSValue js_recv(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
 
   JSValue result = JS_NewStringLen(ctx, buf, received);
   free(buf);
-
   return result;
 }
 
@@ -418,28 +421,33 @@ static void url_decode(char *dst, const char *src) {
   *dst = '\0';
 }
 
-// parse_http_request(data) -> {method, url, path, query, headers, body}
+// parse_http_request(data) -> {method, url, path, query, headers, body, httpVersion}
 static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   size_t data_len;
   const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
   if (!data)
     return JS_EXCEPTION;
 
+  if (data_len == 0) {
+    JS_FreeCString(ctx, data);
+    return JS_ThrowInternalError(ctx, "Empty request data");
+  }
+
   JSValue result = JS_NewObject(ctx);
   JSValue headers = JS_NewObject(ctx);
   JSValue query = JS_NewObject(ctx);
-
+  
   const char *p = data;
   const char *end = data + data_len;
-  
-  // Parse request line: METHOD URL HTTP/1.1
+
+  // Parse request line: METHOD URL HTTP/VERSION
   const char *method_start = p;
   while (p < end && *p != ' ') p++;
   if (p >= end) goto error;
   
   JS_SetPropertyStr(ctx, result, "method", JS_NewStringLen(ctx, method_start, p - method_start));
   p++; // skip space
-  
+
   // Parse URL
   const char *url_start = p;
   while (p < end && *p != ' ') p++;
@@ -447,15 +455,37 @@ static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int 
   
   size_t url_len = p - url_start;
   char *url_copy = malloc(url_len + 1);
+  if (!url_copy) goto error;
   memcpy(url_copy, url_start, url_len);
   url_copy[url_len] = '\0';
+
+  // Parse HTTP version
+  p++; // skip space
+  const char *version_start = p;
+  while (p < end && *p != '\r' && *p != '\n') p++;
+  size_t version_len = p - version_start;
+  
+  // Extract HTTP version (e.g., "HTTP/1.0" or "HTTP/1.1")
+  char *http_version = malloc(version_len + 1);
+  if (!http_version) {
+    free(url_copy);
+    goto error;
+  }
+  memcpy(http_version, version_start, version_len);
+  http_version[version_len] = '\0';
+  JS_SetPropertyStr(ctx, result, "httpVersion", JS_NewString(ctx, http_version));
+  free(http_version);
+  
+  // Skip to end of request line
+  while (p < end && *p != '\n') p++;
+  if (p < end && *p == '\n') p++;
   
   // Split URL into path and query
   char *query_sep = strchr(url_copy, '?');
   if (query_sep) {
     *query_sep = '\0';
     char *query_str = query_sep + 1;
-    
+
     // Parse query string
     char *q = query_str;
     while (*q) {
@@ -464,42 +494,38 @@ static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int 
       char *amp = strchr(q, '&');
       
       if (!amp) amp = q + strlen(q);
-      
+
       if (eq && eq < amp) {
         *eq = '\0';
         if (*amp) *amp = '\0';
-        
-        char decoded_key[256], decoded_value[2048];
+
+        char decoded_key[256] = {0}, decoded_value[2048] = {0};
         url_decode(decoded_key, key_start);
         url_decode(decoded_value, eq + 1);
-        
+
         JS_SetPropertyStr(ctx, query, decoded_key, JS_NewString(ctx, decoded_value));
         q = *amp ? amp + 1 : amp;
       } else {
         if (*amp) *amp = '\0';
-        
-        char decoded_key[256];
+
+        char decoded_key[256] = {0};
         url_decode(decoded_key, key_start);
         JS_SetPropertyStr(ctx, query, decoded_key, JS_NewString(ctx, ""));
         q = *amp ? amp + 1 : amp;
       }
     }
   }
-  
+
   JS_SetPropertyStr(ctx, result, "url", JS_NewString(ctx, url_copy));
   JS_SetPropertyStr(ctx, result, "path", JS_NewString(ctx, url_copy));
   JS_SetPropertyStr(ctx, result, "query", query);
   free(url_copy);
   
-  // Skip to end of request line
-  while (p < end && *p != '\n') p++;
-  if (p >= end) goto error;
-  p++; // skip \n
-  
   // Parse headers
   int content_length = 0;
   char content_type[128] = {0};
-  
+  char connection_header[64] = {0};
+
   while (p < end) {
     // Check for empty line (end of headers)
     if (*p == '\r' && p + 1 < end && *(p + 1) == '\n') {
@@ -510,8 +536,8 @@ static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int 
       p++;
       break;
     }
-    
-    // Parse header
+
+    // Parse header name
     const char *header_name_start = p;
     while (p < end && *p != ':') p++;
     if (p >= end) break;
@@ -525,7 +551,7 @@ static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int 
       header_name[i] = tolower(header_name_start[i]);
     }
     header_name[header_name_len] = '\0';
-    
+
     p++; // skip ':'
     while (p < end && (*p == ' ' || *p == '\t')) p++; // skip whitespace
     
@@ -533,7 +559,7 @@ static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int 
     while (p < end && *p != '\r' && *p != '\n') p++;
     
     size_t value_len = p - value_start;
-    
+
     // Track special headers
     if (strcmp(header_name, "content-length") == 0) {
       char len_str[32];
@@ -547,40 +573,49 @@ static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int 
         memcpy(content_type, value_start, value_len);
         content_type[value_len] = '\0';
       }
+    } else if (strcmp(header_name, "connection") == 0) {
+      if (value_len < sizeof(connection_header)) {
+        memcpy(connection_header, value_start, value_len);
+        connection_header[value_len] = '\0';
+      }
     }
     
     JS_SetPropertyStr(ctx, headers, header_name, JS_NewStringLen(ctx, value_start, value_len));
-    
+
     // Skip to next line
     if (p < end && *p == '\r') p++;
     if (p < end && *p == '\n') p++;
   }
-  
+
   JS_SetPropertyStr(ctx, result, "headers", headers);
-  
+
   // Parse body (p now points to start of body)
   if (content_length > 0 && p < end) {
     size_t available = end - p;
     size_t body_len = content_length < available ? content_length : available;
-    
-    // Check if it's JSON
-    if (strstr(content_type, "application/json")) {
-      // Try to parse as JSON
-      JSValue json_val = JS_ParseJSON(ctx, p, body_len, "<body>");
-      if (!JS_IsException(json_val)) {
-        JS_SetPropertyStr(ctx, result, "body", json_val);
+
+    if (body_len > 0) {
+      // Check if it's JSON
+      if (strstr(content_type, "application/json")) {
+        // Try to parse as JSON
+        JSValue json_val = JS_ParseJSON(ctx, p, body_len, "<body>");
+        if (!JS_IsException(json_val)) {
+          JS_SetPropertyStr(ctx, result, "body", json_val);
+        } else {
+          // Fall back to string if JSON parsing fails
+          JS_FreeValue(ctx, json_val);
+          JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, p, body_len));
+        }
       } else {
-        // Fall back to string if JSON parsing fails
-        JS_FreeValue(ctx, json_val);
         JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, p, body_len));
       }
     } else {
-      JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, p, body_len));
+      JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
     }
   } else {
     JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
   }
-  
+
   JS_FreeCString(ctx, data);
   return result;
 
@@ -590,6 +625,42 @@ error:
   JS_FreeValue(ctx, query);
   JS_FreeValue(ctx, result);
   return JS_ThrowInternalError(ctx, "Invalid HTTP request");
+}
+
+// get_error() -> returns current errno string
+static JSValue js_get_error(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  return JS_NewString(ctx, strerror(errno));
+}
+
+// is_connected(fd) -> returns boolean
+static JSValue js_is_connected(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  int fd;
+  if (JS_ToInt32(ctx, &fd, argv[0]))
+    return JS_EXCEPTION;
+
+  struct sockaddr_in sa;
+  socklen_t len = sizeof(sa);
+  
+  // Get peer address
+  if (getpeername(fd, (struct sockaddr *)&sa, &len) < 0) {
+    return JS_NewBool(ctx, 0);
+  }
+  
+  // Check if socket is ready for writing (connected)
+  fd_set wfds;
+  struct timeval tv = {0, 0};
+  
+  FD_ZERO(&wfds);
+  FD_SET(fd, &wfds);
+  
+  if (select(fd + 1, NULL, &wfds, NULL, &tv) > 0) {
+    int error = 0;
+    socklen_t errlen = sizeof(error);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen);
+    return JS_NewBool(ctx, error == 0);
+  }
+  
+  return JS_NewBool(ctx, 0);
 }
 
 static const JSCFunctionListEntry js_socket_funcs[] = {
@@ -609,6 +680,8 @@ static const JSCFunctionListEntry js_socket_funcs[] = {
   JS_CFUNC_DEF("epoll_ctl", 4, js_epoll_ctl),
   JS_CFUNC_DEF("epoll_wait", 3, js_epoll_wait),
   JS_CFUNC_DEF("parse_http_request", 1, js_parse_http_request),
+  JS_CFUNC_DEF("get_error", 0, js_get_error),
+  JS_CFUNC_DEF("is_connected", 1, js_is_connected),
   JS_PROP_INT32_DEF("EPOLL_CTL_ADD", EPOLL_CTL_ADD, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLL_CTL_MOD", EPOLL_CTL_MOD, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLL_CTL_DEL", EPOLL_CTL_DEL, JS_PROP_CONFIGURABLE),

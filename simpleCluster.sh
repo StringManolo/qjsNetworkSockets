@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-NUM_WORKERS=${1:-4}
+NUM_WORKERS=${1:-6}
 PORT=8080
 
 echo "Starting $NUM_WORKERS workers on port $PORT..."

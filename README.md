@@ -25,6 +25,8 @@ Quick comparison (10K requests, 100 concurrent):
 - **Node.js Express**: 280 req/s, 357ms avg latency
 - **Sync qjsNetworkSockets**: 356 req/s, 280ms avg latency
 
+> Hisilicon Kirin710 (8) @ 1.709GHz (Smartphone)
+
 ---
 
 ## Quick Start

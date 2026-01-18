@@ -11,9 +11,12 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 #define MAX_EVENTS 1024
+#define MAX_HEADERS 64
+#define MAX_HEADER_SIZE 8192
 
 // Socket constants
 static const JSCFunctionListEntry js_socket_constants[] = {
@@ -26,6 +29,7 @@ static const JSCFunctionListEntry js_socket_constants[] = {
   JS_PROP_INT32_DEF("IPPROTO_UDP", IPPROTO_UDP, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SOL_SOCKET", SOL_SOCKET, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SO_REUSEADDR", SO_REUSEADDR, JS_PROP_CONFIGURABLE),
+  JS_PROP_INT32_DEF("SO_REUSEPORT", SO_REUSEPORT, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SO_KEEPALIVE", SO_KEEPALIVE, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SO_RCVBUF", SO_RCVBUF, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("SO_SNDBUF", SO_SNDBUF, JS_PROP_CONFIGURABLE),
@@ -384,6 +388,210 @@ static JSValue js_gethostbyname(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_NewString(ctx, addr);
 }
 
+// HTTP Parser helpers
+static inline char *skip_whitespace(char *p) {
+  while (*p == ' ' || *p == '\t') p++;
+  return p;
+}
+
+static inline char *find_eol(char *p) {
+  while (*p && *p != '\r' && *p != '\n') p++;
+  return p;
+}
+
+static void url_decode(char *dst, const char *src) {
+  while (*src) {
+    if (*src == '%' && isxdigit(src[1]) && isxdigit(src[2])) {
+      int c1 = tolower(src[1]);
+      int c2 = tolower(src[2]);
+      c1 = c1 <= '9' ? c1 - '0' : c1 - 'a' + 10;
+      c2 = c2 <= '9' ? c2 - '0' : c2 - 'a' + 10;
+      *dst++ = (c1 << 4) | c2;
+      src += 3;
+    } else if (*src == '+') {
+      *dst++ = ' ';
+      src++;
+    } else {
+      *dst++ = *src++;
+    }
+  }
+  *dst = '\0';
+}
+
+// parse_http_request(data) -> {method, url, path, query, headers, body}
+static JSValue js_parse_http_request(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  size_t data_len;
+  const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
+  if (!data)
+    return JS_EXCEPTION;
+
+  JSValue result = JS_NewObject(ctx);
+  JSValue headers = JS_NewObject(ctx);
+  JSValue query = JS_NewObject(ctx);
+
+  const char *p = data;
+  const char *end = data + data_len;
+  
+  // Parse request line: METHOD URL HTTP/1.1
+  const char *method_start = p;
+  while (p < end && *p != ' ') p++;
+  if (p >= end) goto error;
+  
+  JS_SetPropertyStr(ctx, result, "method", JS_NewStringLen(ctx, method_start, p - method_start));
+  p++; // skip space
+  
+  // Parse URL
+  const char *url_start = p;
+  while (p < end && *p != ' ') p++;
+  if (p >= end) goto error;
+  
+  size_t url_len = p - url_start;
+  char *url_copy = malloc(url_len + 1);
+  memcpy(url_copy, url_start, url_len);
+  url_copy[url_len] = '\0';
+  
+  // Split URL into path and query
+  char *query_sep = strchr(url_copy, '?');
+  if (query_sep) {
+    *query_sep = '\0';
+    char *query_str = query_sep + 1;
+    
+    // Parse query string
+    char *q = query_str;
+    while (*q) {
+      char *key_start = q;
+      char *eq = strchr(q, '=');
+      char *amp = strchr(q, '&');
+      
+      if (!amp) amp = q + strlen(q);
+      
+      if (eq && eq < amp) {
+        *eq = '\0';
+        if (*amp) *amp = '\0';
+        
+        char decoded_key[256], decoded_value[2048];
+        url_decode(decoded_key, key_start);
+        url_decode(decoded_value, eq + 1);
+        
+        JS_SetPropertyStr(ctx, query, decoded_key, JS_NewString(ctx, decoded_value));
+        q = *amp ? amp + 1 : amp;
+      } else {
+        if (*amp) *amp = '\0';
+        
+        char decoded_key[256];
+        url_decode(decoded_key, key_start);
+        JS_SetPropertyStr(ctx, query, decoded_key, JS_NewString(ctx, ""));
+        q = *amp ? amp + 1 : amp;
+      }
+    }
+  }
+  
+  JS_SetPropertyStr(ctx, result, "url", JS_NewString(ctx, url_copy));
+  JS_SetPropertyStr(ctx, result, "path", JS_NewString(ctx, url_copy));
+  JS_SetPropertyStr(ctx, result, "query", query);
+  free(url_copy);
+  
+  // Skip to end of request line
+  while (p < end && *p != '\n') p++;
+  if (p >= end) goto error;
+  p++; // skip \n
+  
+  // Parse headers
+  int content_length = 0;
+  char content_type[128] = {0};
+  
+  while (p < end) {
+    // Check for empty line (end of headers)
+    if (*p == '\r' && p + 1 < end && *(p + 1) == '\n') {
+      p += 2; // skip \r\n
+      break;
+    }
+    if (*p == '\n') {
+      p++;
+      break;
+    }
+    
+    // Parse header
+    const char *header_name_start = p;
+    while (p < end && *p != ':') p++;
+    if (p >= end) break;
+    
+    size_t header_name_len = p - header_name_start;
+    char header_name[256];
+    if (header_name_len >= sizeof(header_name)) header_name_len = sizeof(header_name) - 1;
+    
+    // Copy and lowercase header name
+    for (size_t i = 0; i < header_name_len; i++) {
+      header_name[i] = tolower(header_name_start[i]);
+    }
+    header_name[header_name_len] = '\0';
+    
+    p++; // skip ':'
+    while (p < end && (*p == ' ' || *p == '\t')) p++; // skip whitespace
+    
+    const char *value_start = p;
+    while (p < end && *p != '\r' && *p != '\n') p++;
+    
+    size_t value_len = p - value_start;
+    
+    // Track special headers
+    if (strcmp(header_name, "content-length") == 0) {
+      char len_str[32];
+      if (value_len < sizeof(len_str)) {
+        memcpy(len_str, value_start, value_len);
+        len_str[value_len] = '\0';
+        content_length = atoi(len_str);
+      }
+    } else if (strcmp(header_name, "content-type") == 0) {
+      if (value_len < sizeof(content_type)) {
+        memcpy(content_type, value_start, value_len);
+        content_type[value_len] = '\0';
+      }
+    }
+    
+    JS_SetPropertyStr(ctx, headers, header_name, JS_NewStringLen(ctx, value_start, value_len));
+    
+    // Skip to next line
+    if (p < end && *p == '\r') p++;
+    if (p < end && *p == '\n') p++;
+  }
+  
+  JS_SetPropertyStr(ctx, result, "headers", headers);
+  
+  // Parse body (p now points to start of body)
+  if (content_length > 0 && p < end) {
+    size_t available = end - p;
+    size_t body_len = content_length < available ? content_length : available;
+    
+    // Check if it's JSON
+    if (strstr(content_type, "application/json")) {
+      // Try to parse as JSON
+      JSValue json_val = JS_ParseJSON(ctx, p, body_len, "<body>");
+      if (!JS_IsException(json_val)) {
+        JS_SetPropertyStr(ctx, result, "body", json_val);
+      } else {
+        // Fall back to string if JSON parsing fails
+        JS_FreeValue(ctx, json_val);
+        JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, p, body_len));
+      }
+    } else {
+      JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, p, body_len));
+    }
+  } else {
+    JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
+  }
+  
+  JS_FreeCString(ctx, data);
+  return result;
+
+error:
+  JS_FreeCString(ctx, data);
+  JS_FreeValue(ctx, headers);
+  JS_FreeValue(ctx, query);
+  JS_FreeValue(ctx, result);
+  return JS_ThrowInternalError(ctx, "Invalid HTTP request");
+}
+
 static const JSCFunctionListEntry js_socket_funcs[] = {
   JS_CFUNC_DEF("socket", 3, js_socket),
   JS_CFUNC_DEF("bind", 3, js_bind),
@@ -400,6 +608,7 @@ static const JSCFunctionListEntry js_socket_funcs[] = {
   JS_CFUNC_DEF("epoll_create1", 1, js_epoll_create1),
   JS_CFUNC_DEF("epoll_ctl", 4, js_epoll_ctl),
   JS_CFUNC_DEF("epoll_wait", 3, js_epoll_wait),
+  JS_CFUNC_DEF("parse_http_request", 1, js_parse_http_request),
   JS_PROP_INT32_DEF("EPOLL_CTL_ADD", EPOLL_CTL_ADD, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLL_CTL_MOD", EPOLL_CTL_MOD, JS_PROP_CONFIGURABLE),
   JS_PROP_INT32_DEF("EPOLL_CTL_DEL", EPOLL_CTL_DEL, JS_PROP_CONFIGURABLE),

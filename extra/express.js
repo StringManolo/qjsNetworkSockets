@@ -1,50 +1,17 @@
 import sockets from '../dist/network_sockets.so';
 
 class Request {
-  constructor(rawRequest, clientInfo) {
-    this.raw = rawRequest;
+  constructor(parsedRequest, clientInfo) {
     this.clientInfo = clientInfo;
-    this.method = '';
-    this.url = '';
-    this.path = '';
-    this.query = {};
-    this.headers = {};
-    this.body = '';
+    
+    // El parsing ya está hecho en C - solo asignar propiedades
+    this.method = parsedRequest.method || '';
+    this.url = parsedRequest.url || '';
+    this.path = parsedRequest.path || '';
+    this.query = parsedRequest.query || {};
+    this.headers = parsedRequest.headers || {};
+    this.body = parsedRequest.body || '';
     this.params = {};
-
-    this._parse(rawRequest);
-  }
-
-  _parse(raw) {
-    const lines = raw.split('\r\n');
-    const requestLine = lines[0].split(' ');
-
-    this.method = requestLine[0];
-    this.url = requestLine[1];
-
-    const urlParts = this.url.split('?');
-    this.path = urlParts[0];
-
-    if (urlParts[1]) {
-      const queryPairs = urlParts[1].split('&');
-      for (const pair of queryPairs) {
-        const [key, value] = pair.split('=');
-        this.query[decodeURIComponent(key)] = decodeURIComponent(value || '');
-      }
-    }
-
-    let i = 1;
-    while (i < lines.length && lines[i] !== '') {
-      const [key, ...valueParts] = lines[i].split(':');
-      if (key) {
-        this.headers[key.toLowerCase().trim()] = valueParts.join(':').trim();
-      }
-      i++;
-    }
-
-    if (i < lines.length - 1) {
-      this.body = lines.slice(i + 1).join('\r\n');
-    }
   }
 
   get(header) {
@@ -58,7 +25,8 @@ class Response {
     this.statusCode = 200;
     this.headers = {
       'Content-Type': 'text/html; charset=utf-8',
-      'Connection': 'close'
+      'Connection': 'keep-alive', 
+      'Keep-Alive': 'timeout=5, max=1000'
     };
     this.sent = false;
     this._buffer = '';
@@ -238,9 +206,15 @@ class Express extends Router {
   listen(port, host = '0.0.0.0', callback) {
     this.serverFd = sockets.socket(sockets.AF_INET, sockets.SOCK_STREAM, 0);
 
+    // Configurar servidor para máximo rendimiento
     sockets.setsockopt(this.serverFd, sockets.SOL_SOCKET, sockets.SO_REUSEADDR, 1);
+    sockets.setsockopt(this.serverFd, sockets.SOL_SOCKET, sockets.SO_REUSEPORT, 1);  // ← ¡NUEVO!
+
+    sockets.setsockopt(this.serverFd, sockets.SOL_SOCKET, sockets.SO_RCVBUF, 262144); // 256KB
+    sockets.setsockopt(this.serverFd, sockets.SOL_SOCKET, sockets.SO_SNDBUF, 262144); // 256KB
+    
     sockets.bind(this.serverFd, host, port);
-    sockets.listen(this.serverFd, 1024);
+    sockets.listen(this.serverFd, 2048); // Backlog más grande
     sockets.setnonblocking(this.serverFd);
 
     // Crear epoll
@@ -258,36 +232,37 @@ class Express extends Router {
       callback();
     }
 
-    // Event loop con epoll
+    // Event loop con epoll - timeout muy bajo
     while (true) {
       try {
-        const events = sockets.epoll_wait(this.epollFd, 256, 1000);
+        const events = sockets.epoll_wait(this.epollFd, 512, 1); // 1ms timeout
         
         for (const event of events) {
           if (event.fd === this.serverFd) {
-            // Nueva conexión
             this._acceptConnections();
           } else {
-            // Datos de cliente
             this._handleClientEvent(event);
           }
         }
       } catch (e) {
-        // console.log('Event loop error:', e);
+        // Ignore
       }
     }
   }
 
   _acceptConnections() {
-    // Aceptar todas las conexiones pendientes
+    // Aceptar todas las conexiones pendientes (edge-triggered)
     while (true) {
       try {
         const client = sockets.accept(this.serverFd);
-        if (!client) break; // No hay más conexiones
+        if (!client) break;
 
-        // Configurar socket del cliente
+        // Configurar socket del cliente para máximo rendimiento
         sockets.setnonblocking(client.fd);
         sockets.setsockopt(client.fd, sockets.IPPROTO_TCP, sockets.TCP_NODELAY, 1);
+        sockets.setsockopt(client.fd, sockets.SOL_SOCKET, sockets.SO_KEEPALIVE, 1);
+        sockets.setsockopt(client.fd, sockets.SOL_SOCKET, sockets.SO_RCVBUF, 65536);
+        sockets.setsockopt(client.fd, sockets.SOL_SOCKET, sockets.SO_SNDBUF, 65536);
 
         // Agregar cliente al epoll
         sockets.epoll_ctl(
@@ -301,7 +276,8 @@ class Express extends Router {
         this.clients.set(client.fd, {
           info: client,
           buffer: '',
-          responseBuffer: ''
+          requestCount: 0,
+          lastActivity: Date.now()
         });
       } catch (e) {
         break;
@@ -313,52 +289,89 @@ class Express extends Router {
     const clientData = this.clients.get(event.fd);
     if (!clientData) return;
 
+    // Cerrar si hay error
+    if (event.events & (sockets.EPOLLERR | sockets.EPOLLHUP)) {
+      this._closeClient(event.fd);
+      return;
+    }
+
     try {
-      // Leer todos los datos disponibles
+      // Leer TODOS los datos disponibles (edge-triggered)
       while (true) {
-        const chunk = sockets.recv(event.fd, 8192, 0);
+        const chunk = sockets.recv(event.fd, 16384, 0); // Buffer más grande
         if (!chunk || chunk.length === 0) break;
         
         clientData.buffer += chunk;
-        
-        // Si ya tenemos una petición HTTP completa
-        if (clientData.buffer.includes('\r\n\r\n')) {
-          this._processRequest(event.fd, clientData);
-          break;
-        }
       }
 
-      // Si hay error o cierre
-      if (event.events & (sockets.EPOLLERR | sockets.EPOLLHUP)) {
-        this._closeClient(event.fd);
-      }
+      // Procesar múltiples requests en el buffer (pipelining)
+      this._processBuffer(event.fd, clientData);
+
     } catch (e) {
       this._closeClient(event.fd);
     }
   }
 
-  _processRequest(fd, clientData) {
-    try {
-      const req = new Request(clientData.buffer, clientData.info);
-      const res = new Response(fd);
+  _processBuffer(fd, clientData) {
+    // Procesar todas las requests completas en el buffer
+    while (clientData.buffer.length > 0) {
+      // Buscar el final de los headers
+      const headerEnd = clientData.buffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return; // Headers incompletos, esperar más datos
 
-      this._handleRequest(req, res);
+      // Parsear headers para obtener Content-Length
+      const headersPart = clientData.buffer.substring(0, headerEnd);
+      const contentLengthMatch = headersPart.match(/Content-Length:\s*(\d+)/i);
+      const contentLength = contentLengthMatch ? parseInt(contentLengthMatch[1]) : 0;
 
-      if (res.sent && res._buffer) {
-        // Enviar respuesta
-        const data = res._buffer;
-        let sent = 0;
-        
-        while (sent < data.length) {
-          const n = sockets.send(fd, data.slice(sent), 0);
-          if (n <= 0) break;
-          sent += n;
+      // Verificar si tenemos el body completo
+      const totalLength = headerEnd + 4 + contentLength;
+      if (clientData.buffer.length < totalLength) return; // Body incompleto, esperar más datos
+
+      // Extraer la request completa
+      const requestData = clientData.buffer.substring(0, totalLength);
+      clientData.buffer = clientData.buffer.substring(totalLength);
+
+      // Procesar la request usando el parser nativo de C
+      try {
+        // Parser nativo hace TODO el trabajo pesado en C
+        const parsedRequest = sockets.parse_http_request(requestData);
+        const req = new Request(parsedRequest, clientData.info);
+        const res = new Response(fd);
+
+        this._handleRequest(req, res);
+
+        if (res.sent && res._buffer) {
+          // Enviar respuesta
+          this._sendResponse(fd, res._buffer);
+
+          clientData.requestCount++;
+          clientData.lastActivity = Date.now();
+
+          // Cerrar si el cliente pidió Connection: close
+          if (req.headers['connection'] === 'close' || clientData.requestCount >= 1000) {
+            this._closeClient(fd);
+            return;
+          }
         }
+      } catch (e) {
+        // Error procesando, cerrar conexión
+        this._closeClient(fd);
+        return;
       }
-    } catch (e) {
-      // console.log('Error processing:', e);
-    } finally {
-      this._closeClient(fd);
+    }
+  }
+
+  _sendResponse(fd, data) {
+    let sent = 0;
+    while (sent < data.length) {
+      try {
+        const n = sockets.send(fd, data.slice(sent), 0);
+        if (n <= 0) break;
+        sent += n;
+      } catch (e) {
+        break;
+      }
     }
   }
 
@@ -368,7 +381,7 @@ class Express extends Router {
       sockets.close(fd);
       this.clients.delete(fd);
     } catch (e) {
-      // Ignore errors
+      // Ignore
     }
   }
 

@@ -128,6 +128,7 @@ httpResponse.generate400 = (errorMsg) => {
         <li>Invalid Content-Length header</li>
         <li>Incomplete request body</li>
         <li>Missing required headers (e.g., Host in HTTP/1.1)</li>
+        <li>Invalid chunked encoding (e.g., malformed chunk size, missing CRLF)</li>
       </ul>
     </div>
   `;
@@ -220,6 +221,7 @@ httpResponse.generateRouteHome = () => {
         <li>Support for multiple HTTP methods (GET, POST, PUT, DELETE, PATCH, etc.)</li>
         <li>Proper error handling with meaningful error pages</li>
         <li>Header validation and body parsing</li>
+        <li>Transfer-Encoding: chunked support</li>
         <li>Fat GET support (RFC 7231)</li>
         <li>Required header validation (Host for HTTP/1.1)</li>
       </ul>
@@ -328,10 +330,10 @@ httpResponse.generateRouteStatus = () => {
         <li>✓ Protocol Validation</li>
         <li>✓ Header Parsing</li>
         <li>✓ Body Parsing (Content-Length)</li>
+        <li>✓ Body Parsing (Transfer-Encoding: chunked)</li>
         <li>✓ Required Header Validation (Host for HTTP/1.1)</li>
         <li>✓ Error Handling (400, 404, 501)</li>
         <li>✓ Basic Routing</li>
-        <li>⚠ Chunked Encoding (TODO)</li>
       </ul>
     </div>
   `;
@@ -492,6 +494,73 @@ httpParser.validateRequiredHeaders = (protocol, headers) => {
   return hasRequiredHeaders;
 }
 
+httpParser.parseChunkedBody = (rawBody) => {
+  let completeBody = "";
+  let currentIndex = 0;
+  let isValidChunk = false;
+  let hasMoreChunks = true;
+
+  while (hasMoreChunks) {
+    isValidChunk = false;
+
+    // Find the end of the chunk size line
+    const chunkSizeEndIndex = rawBody.indexOf("\r\n", currentIndex);
+    if (chunkSizeEndIndex === -1) {
+      throw new HttpParseError("chunked encoding: missing CRLF after chunk size");
+    }
+
+    // Extract chunk size (in hexadecimal)
+    const chunkSizeLine = rawBody.substring(currentIndex, chunkSizeEndIndex);
+    
+    // Validate chunk size is valid hex
+    if (/^[0-9a-fA-F]+$/.test(chunkSizeLine)) {
+      isValidChunk = true;
+    }
+
+    if (!isValidChunk) {
+      throw new HttpParseError(`chunked encoding: chunk size """${chunkSizeLine}""" is not valid hexadecimal`);
+    }
+
+    const chunkSize = parseInt(chunkSizeLine, 16);
+    
+    if (isNaN(chunkSize) || chunkSize < 0) {
+      throw new HttpParseError(`chunked encoding: chunk size """${chunkSizeLine}""" is not a valid number`);
+    }
+
+    // Chunk size 0 means end of chunks
+    if (chunkSize === 0) {
+      hasMoreChunks = false;
+      break;
+    }
+
+    // Move index to start of chunk data (skip size line + CRLF)
+    currentIndex = chunkSizeEndIndex + 2;
+
+    // Extract chunk data
+    const chunkData = rawBody.substring(currentIndex, currentIndex + chunkSize);
+    
+    if (chunkData.length < chunkSize) {
+      throw new HttpParseError(`chunked encoding: incomplete chunk data, expected ${chunkSize} bytes, got ${chunkData.length}`);
+    }
+
+    completeBody += chunkData;
+
+    // Move index past chunk data
+    currentIndex += chunkSize;
+
+    // Verify CRLF after chunk data
+    const chunkEndCRLF = rawBody.substring(currentIndex, currentIndex + 2);
+    if (chunkEndCRLF !== "\r\n") {
+      throw new HttpParseError("chunked encoding: missing CRLF after chunk data");
+    }
+
+    // Move index past the CRLF
+    currentIndex += 2;
+  }
+
+  return completeBody;
+}
+
 httpParser.getBody = (rawRequest, method, headers) => {
   let hasBodySupport = false;
   let hasBody = false;
@@ -551,8 +620,8 @@ httpParser.getBody = (rawRequest, method, headers) => {
 
   // Handle Transfer-Encoding: chunked
   if (bodyInfo.transferEncoding.toLowerCase().includes("chunked")) {
-    // TODO: Parse chunked encoding
-    bodyInfo.raw = rawBody;
+    bodyInfo.raw = httpParser.parseChunkedBody(rawBody);
+    bodyInfo.contentLength = bodyInfo.raw.length;
     return bodyInfo;
   }
 

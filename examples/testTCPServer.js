@@ -2,7 +2,7 @@ import createServer from '../extra/tcp.js';
 
 const server = createServer();
 
-server.validMethods = [
+server.validMethods = [ // Everything else will be a 501 Not implemented by default
   "OPTIONS",
   "GET",
   "HEAD",

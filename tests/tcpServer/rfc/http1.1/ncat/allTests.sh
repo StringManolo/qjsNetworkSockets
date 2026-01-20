@@ -480,6 +480,21 @@ run_test "invalidStaticNotFound.sh - Request non-existent file (404)" \
     "404"
 
 echo ""
+
+# ============================================
+# KEEP-ALIVE TESTS
+# ============================================
+echo -e "${YELLOW}KEEP-ALIVE TESTS${NC}"
+
+run_test "validKeepAlive.sh - Request with Connection: keep-alive" \
+    "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n" \
+    "200"
+
+run_test "validConnectionClose.sh - Request with Connection: close" \
+    "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" \
+    "200"
+
+echo ""
 echo "=========================================="
 echo "Test Summary"
 echo "=========================================="

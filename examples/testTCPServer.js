@@ -1,7 +1,65 @@
 import createServer from '../extra/tcp.js';
 import * as std from 'std';
+import * as os from 'os';
 
 const server = createServer();
+
+// Logging system
+const logger = {};
+
+logger.logFile = "server.log";
+logger.enableConsole = true;
+logger.enableFile = true;
+
+logger.formatTimestamp = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+};
+
+logger.log = (message) => {
+  const timestamp = logger.formatTimestamp();
+  const logLine = `[${timestamp}] ${message}\n`;
+  
+  if (logger.enableConsole) {
+    console.log(logLine.trim());
+  }
+  
+  if (logger.enableFile) {
+    try {
+      const file = std.open(logger.logFile, "a");
+      if (file) {
+        file.puts(logLine);
+        file.close();
+      }
+    } catch (err) {
+      console.error(`Failed to write to log file: ${err}`);
+    }
+  }
+};
+
+logger.logRequest = (method, uri, statusCode, duration) => {
+  const message = `${method} ${uri} ${statusCode} (${duration}ms)`;
+  logger.log(message);
+};
+
+logger.logError = (message) => {
+  logger.log(`ERROR: ${message}`);
+};
+
+logger.logInfo = (message) => {
+  logger.log(`INFO: ${message}`);
+};
+
+// Keep-Alive configuration
+server.keepAliveTimeout = 5000; // 5 seconds
+server.connectionTimeouts = {};
 
 server.validMethods = [ // Everything else will be a 501 Not implemented by default
   "OPTIONS",
@@ -90,7 +148,7 @@ httpResponse.htmlTemplate = (title, mainContent) => {
 </html>`;
 };
 
-httpResponse.generate200 = () => {
+httpResponse.generate200 = (keepAlive = false) => {
   const mainContent = `
     <div class="success">
       <h2>✓ 200 OK</h2>
@@ -101,18 +159,19 @@ httpResponse.generate200 = () => {
 
   const body = httpResponse.htmlTemplate('200 OK', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 200 OK\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.generate400 = (errorMsg) => {
+httpResponse.generate400 = (errorMsg, keepAlive = false) => {
   const mainContent = `
     <div class="error-code">400</div>
     <div class="error-message">Bad Request</div>
@@ -138,18 +197,19 @@ httpResponse.generate400 = (errorMsg) => {
 
   const body = httpResponse.htmlTemplate('400 Bad Request', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 400 Bad Request\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.generate501 = (errorMsg) => {
+httpResponse.generate501 = (errorMsg, keepAlive = false) => {
   const mainContent = `
     <div class="error-code">501</div>
     <div class="error-message">Not Implemented</div>
@@ -170,18 +230,19 @@ httpResponse.generate501 = (errorMsg) => {
 
   const body = httpResponse.htmlTemplate('501 Not Implemented', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 501 Not Implemented\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.generate404 = (uri) => {
+httpResponse.generate404 = (uri, keepAlive = false) => {
   const mainContent = `
     <div class="error-code">404</div>
     <div class="error-message">Not Found</div>
@@ -200,18 +261,19 @@ httpResponse.generate404 = (uri) => {
 
   const body = httpResponse.htmlTemplate('404 Not Found', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 404 Not Found\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.generateRouteHome = () => {
+httpResponse.generateRouteHome = (keepAlive = false) => {
   const mainContent = `
     <div class="success">
       <h2>🏠 Home</h2>
@@ -231,6 +293,8 @@ httpResponse.generateRouteHome = () => {
         <li>JSON request/response helpers</li>
         <li>POST form parsing (application/x-www-form-urlencoded)</li>
         <li>Static file serving from public/ directory</li>
+        <li>Request logging system</li>
+        <li>HTTP Keep-Alive support</li>
       </ul>
       <h3>Quick Links:</h3>
       <ul>
@@ -244,18 +308,19 @@ httpResponse.generateRouteHome = () => {
 
   const body = httpResponse.htmlTemplate('Home - qjsNetworkSockets', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 200 OK\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.generateRouteAbout = () => {
+httpResponse.generateRouteAbout = (keepAlive = false) => {
   const mainContent = `
     <div class="success">
       <h2>ℹ️ About</h2>
@@ -295,24 +360,27 @@ httpResponse.generateRouteAbout = () => {
         <li>POST form parsing (application/x-www-form-urlencoded)</li>
         <li>Static file serving from public/ directory with MIME type detection</li>
         <li>RESTful endpoint example (<code>/api/echo</code>)</li>
+        <li>Request logging with timestamps and response times</li>
+        <li>Persistent connections with Keep-Alive</li>
       </ul>
     </div>
   `;
 
   const body = httpResponse.htmlTemplate('About - qjsNetworkSockets', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 200 OK\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.generateRouteStatus = () => {
+httpResponse.generateRouteStatus = (keepAlive = false) => {
   const mainContent = `
     <div class="success">
       <h2>📊 Server Status</h2>
@@ -340,6 +408,10 @@ httpResponse.generateRouteStatus = () => {
           <td style="padding: 8px;"><strong>Timestamp:</strong></td>
           <td style="padding: 8px;">${new Date().toISOString()}</td>
         </tr>
+        <tr style="border-bottom: 1px solid #ddd;">
+          <td style="padding: 8px;"><strong>Keep-Alive Timeout:</strong></td>
+          <td style="padding: 8px;">${server.keepAliveTimeout}ms</td>
+        </tr>
       </table>
 
       <h3>Capabilities:</h3>
@@ -357,6 +429,8 @@ httpResponse.generateRouteStatus = () => {
         <li>✓ JSON Request/Response</li>
         <li>✓ POST Form Parsing (application/x-www-form-urlencoded)</li>
         <li>✓ Static File Serving</li>
+        <li>✓ Request Logging</li>
+        <li>✓ HTTP Keep-Alive / Persistent Connections</li>
       </ul>
       
       <h3>API Endpoints:</h3>
@@ -372,24 +446,25 @@ httpResponse.generateRouteStatus = () => {
 
   const body = httpResponse.htmlTemplate('Status - qjsNetworkSockets', mainContent);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 200 OK\r\n' +
     'Content-Type: text/html; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
 };
 
-httpResponse.routeRequest = (uri, req) => {
+httpResponse.routeRequest = (uri, req, keepAlive = false) => {
   // Remove query string from URI for routing
   const baseUri = uri.includes("?") ? uri.substring(0, uri.indexOf("?")) : uri;
 
   // Try to serve static file first
   if (baseUri !== "/" && baseUri !== "") {
-    const staticResponse = httpResponse.serveStaticFile(baseUri);
+    const staticResponse = httpResponse.serveStaticFile(baseUri, keepAlive);
     if (staticResponse !== null) {
       return staticResponse;
     }
@@ -397,11 +472,11 @@ httpResponse.routeRequest = (uri, req) => {
 
   // Dynamic routes
   if (baseUri === "/" || baseUri === "") {
-    return httpResponse.generateRouteHome();
+    return httpResponse.generateRouteHome(keepAlive);
   } else if (baseUri === "/about") {
-    return httpResponse.generateRouteAbout();
+    return httpResponse.generateRouteAbout(keepAlive);
   } else if (baseUri === "/status") {
-    return httpResponse.generateRouteStatus();
+    return httpResponse.generateRouteStatus(keepAlive);
   } else if (baseUri === "/api/echo") {
     // Echo endpoint - returns request info as JSON
     const response = {
@@ -417,13 +492,13 @@ httpResponse.routeRequest = (uri, req) => {
       json: req.json,
       form: req.form
     };
-    return httpResponse.json(response, 200);
+    return httpResponse.json(response, 200, keepAlive);
   } else {
-    return httpResponse.generate404(uri);
+    return httpResponse.generate404(uri, keepAlive);
   }
 };
 
-httpResponse.json = (data, statusCode = 200) => {
+httpResponse.json = (data, statusCode = 200, keepAlive = false) => {
   let statusText = "OK";
   
   if (statusCode === 201) {
@@ -438,12 +513,13 @@ httpResponse.json = (data, statusCode = 200) => {
 
   const body = JSON.stringify(data);
   const contentLength = getByteLength(body);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     `HTTP/1.1 ${statusCode} ${statusText}\r\n` +
     'Content-Type: application/json; charset=utf-8\r\n' +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     body
   );
@@ -496,7 +572,7 @@ httpResponse.getMimeType = (filepath) => {
   return mimeType;
 };
 
-httpResponse.serveStaticFile = (filepath) => {
+httpResponse.serveStaticFile = (filepath, keepAlive = false) => {
   let fileContent = null;
   let isFileRead = false;
 
@@ -519,12 +595,13 @@ httpResponse.serveStaticFile = (filepath) => {
 
   const mimeType = httpResponse.getMimeType(filepath);
   const contentLength = getByteLength(fileContent);
+  const connectionHeader = keepAlive ? 'keep-alive' : 'close';
 
   return (
     'HTTP/1.1 200 OK\r\n' +
     `Content-Type: ${mimeType}\r\n` +
     `Content-Length: ${contentLength}\r\n` +
-    'Connection: close\r\n' +
+    `Connection: ${connectionHeader}\r\n` +
     '\r\n' +
     fileContent
   );
@@ -1010,55 +1087,113 @@ httpParser.parseRawRequest = (rawRequest) => {
 
 
 server.onConnection = (conn) => {
-  console.log(`New connection from ${conn.remoteAddr}:${conn.remotePort}`);
+  logger.logInfo(`New connection from ${conn.remoteAddr}:${conn.remotePort}`);
+  conn.requestStartTime = Date.now();
 };
 
 server.onData = (conn) => {
- // console.log('Raw data:', conn.buffer);
-  let req = {};
   try {
-    req = httpParser.parseRawRequest(conn.buffer);
-  } catch (err) {
-    console.log(`Code error: ${err}`);
-    // TODO: Close gracefully, log.
-  }
-
- // console.log(JSON.stringify(req, null, 2));
-try {
-
-  if (conn.buffer.includes('\r\n\r\n')) {
-    let response = '';
-
-    if (req.hasError) {
-      if (req.error.httpCode === 400) {
-        response = httpResponse.generate400(req.error.errorMsg);
-      } else if (req.error.httpCode === 501) {
-        response = httpResponse.generate501(req.error.errorMsg);
-      } else {
-        // Fallback to 400 for unknown errors
-        response = httpResponse.generate400(req.error.errorMsg);
+    let requestsProcessed = 0;
+    
+    // Process all complete requests in buffer
+    while (conn.buffer.includes('\r\n\r\n')) {
+      const requestStartTime = Date.now();
+      
+      let req = {};
+      try {
+        req = httpParser.parseRawRequest(conn.buffer);
+      } catch (err) {
+        logger.logError(`Parse error: ${err}`);
       }
-    } else {
-      // Route the request based on URI
-      response = httpResponse.routeRequest(req.uri, req);
-    }
 
-    console.log("Sending response...");
-    conn.write(response);
-    conn.buffer = '';
+      // Determine if client wants keep-alive
+      let clientWantsKeepAlive = false;
+      if (req.headers && req.headers["Connection"]) {
+        const connHeader = req.headers["Connection"].toLowerCase();
+        if (connHeader.includes("keep-alive")) {
+          clientWantsKeepAlive = true;
+        } else if (connHeader.includes("close")) {
+          clientWantsKeepAlive = false;
+        }
+      }
+
+      // Build response
+      let response = '';
+      let statusCode = 200;
+
+      if (req.hasError) {
+        if (req.error.httpCode === 400) {
+          response = httpResponse.generate400(req.error.errorMsg, false);
+          statusCode = 400;
+        } else if (req.error.httpCode === 501) {
+          response = httpResponse.generate501(req.error.errorMsg, false);
+          statusCode = 501;
+        } else {
+          response = httpResponse.generate400(req.error.errorMsg, false);
+          statusCode = 400;
+        }
+      } else {
+        // Route the request based on URI
+        response = httpResponse.routeRequest(req.uri, req, clientWantsKeepAlive);
+        
+        // Extract status code from response
+        const statusMatch = response.match(/HTTP\/\d\.\d (\d{3})/);
+        if (statusMatch) {
+          statusCode = parseInt(statusMatch[1], 10);
+        }
+      }
+
+      // Calculate response time and log
+      const duration = Date.now() - requestStartTime;
+      const method = req.method || "UNKNOWN";
+      const uri = req.uri || "/";
+      logger.logRequest(method, uri, statusCode, duration);
+
+      // Send response
+      conn.write(response);
+      requestsProcessed++;
+
+      // Remove processed request from buffer
+      const requestEndIndex = conn.buffer.indexOf('\r\n\r\n') + 4;
+      if (req.body && req.body.contentLength > 0) {
+        conn.buffer = conn.buffer.substring(requestEndIndex + req.body.contentLength);
+      } else if (req.body && req.body.transferEncoding && req.body.transferEncoding.toLowerCase().includes("chunked")) {
+        // For chunked encoding, remove the entire parsed body
+        const bodyEndIndex = requestEndIndex + req.body.raw.length;
+        conn.buffer = conn.buffer.substring(bodyEndIndex);
+      } else {
+        conn.buffer = conn.buffer.substring(requestEndIndex);
+      }
+
+      // If client explicitly requested close, close immediately
+      if (!clientWantsKeepAlive) {
+        logger.logInfo(`Closing connection ${conn.fd} after ${requestsProcessed} request(s) (Connection: close)`);
+        server.closeConnection(conn);
+        return;
+      }
+    }
+    
+    // After processing all requests in buffer:
+    // If buffer is empty, close the connection (even with keep-alive)
+    // This prevents connections from hanging indefinitely
+    if (conn.buffer.trim() === "" && requestsProcessed > 0) {
+      logger.logInfo(`Closing connection ${conn.fd} after ${requestsProcessed} request(s) (buffer empty)`);
+      server.closeConnection(conn);
+    }
+  } catch (err) {
+    logger.logError(`Connection error: ${err}`);
     server.closeConnection(conn);
   }
-} catch(err) {
-  console.log("wtf:" + err);
-}
 };
 
 server.onClose = (conn) => {
-  console.log(`Connection closed: ${conn.fd}`);
+  logger.logInfo(`Connection closed: ${conn.fd}`);
 };
 
 server.onError = (err) => {
-  console.log('Server error:' + err);
+  logger.logError(`Server error: ${err}`);
 };
 
+logger.logInfo("Server starting on port 8080...");
 server.listen(8080, '0.0.0.0');
+logger.logInfo("Server listening on 0.0.0.0:8080");

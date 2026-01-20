@@ -30,6 +30,152 @@ server.methodsWithBody = [
   "GET" // RFC 7231 allows "fat GET"
 ];
 
+const httpResponse = {};
+
+const getByteLength = (str) => {
+  let len = 0;
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code <= 0x7F) {
+      len += 1;
+    } else if (code <= 0x7FF) {
+      len += 2;
+    } else if (code <= 0xFFFF) {
+      len += 3;
+    } else {
+      len += 4;
+    }
+  }
+  return len;
+};
+
+httpResponse.htmlTemplate = (title, mainContent) => {
+  const header = `
+    <h1>qjsNetworkSockets HTTP Server</h1>
+    <nav>
+      <a href="/">Home</a> | 
+      <a href="/about">About</a> | 
+      <a href="/status">Status</a>
+    </nav>
+  `;
+
+  const footer = `
+    <hr>
+    <p>Powered by qjsNetworkSockets | QuickJS HTTP/1.1 Server</p>
+    <p><small>RFC 7230-7235 Compliant</small></p>
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head prefix="og:http://ogp.me/ns#">
+  <meta charset="utf-8">
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+  <title>${title}</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 50px auto; padding: 20px; }
+    header { border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+    footer { border-top: 2px solid #333; padding-top: 10px; margin-top: 20px; text-align: center; }
+    .error-code { font-size: 72px; font-weight: bold; color: #d32f2f; }
+    .error-message { font-size: 24px; color: #666; }
+    .error-details { background: #f5f5f5; padding: 15px; margin: 20px 0; border-left: 4px solid #d32f2f; }
+    .success { color: #2e7d32; }
+  </style>
+</head>
+<body>
+  <header>${header}</header>
+  <main>${mainContent}</main>
+  <footer>${footer}</footer>
+</body>
+</html>`;
+};
+
+httpResponse.generate200 = () => {
+  const mainContent = `
+    <div class="success">
+      <h2>✓ 200 OK</h2>
+      <p>Your request was processed successfully.</p>
+      <p>Welcome to qjsNetworkSockets HTTP Server - A lightweight, RFC-compliant HTTP/1.1 server implementation.</p>
+    </div>
+  `;
+
+  const body = httpResponse.htmlTemplate('200 OK', mainContent);
+  const contentLength = getByteLength(body);
+
+  return (
+    'HTTP/1.1 200 OK\r\n' +
+    'Content-Type: text/html; charset=utf-8\r\n' +
+    `Content-Length: ${contentLength}\r\n` +
+    'Connection: close\r\n' +
+    '\r\n' +
+    body
+  );
+};
+
+httpResponse.generate400 = (errorMsg) => {
+  const mainContent = `
+    <div class="error-code">400</div>
+    <div class="error-message">Bad Request</div>
+    <div class="error-details">
+      <h3>Error Details:</h3>
+      <p><strong>Message:</strong> ${errorMsg}</p>
+      <p><strong>Cause:</strong> The server cannot process the request due to malformed syntax or invalid request message framing.</p>
+      <h4>Common Issues:</h4>
+      <ul>
+        <li>Invalid HTTP method token (e.g., contains spaces or invalid characters)</li>
+        <li>Malformed URI (e.g., contains disallowed characters)</li>
+        <li>Invalid protocol format (e.g., not HTTP/X.Y)</li>
+        <li>Malformed headers (e.g., missing colon separator)</li>
+        <li>Invalid Content-Length header</li>
+        <li>Incomplete request body</li>
+      </ul>
+    </div>
+  `;
+
+  const body = httpResponse.htmlTemplate('400 Bad Request', mainContent);
+  const contentLength = getByteLength(body); 
+
+  return (
+    'HTTP/1.1 400 Bad Request\r\n' +
+    'Content-Type: text/html; charset=utf-8\r\n' +
+    `Content-Length: ${contentLength}\r\n` +
+    'Connection: close\r\n' +
+    '\r\n' +
+    body
+  );
+};
+
+httpResponse.generate501 = (errorMsg) => {
+  const mainContent = `
+    <div class="error-code">501</div>
+    <div class="error-message">Not Implemented</div>
+    <div class="error-details">
+      <h3>Error Details:</h3>
+      <p><strong>Message:</strong> ${errorMsg}</p>
+      <p><strong>Cause:</strong> The server does not support the functionality required to fulfill the request.</p>
+      <h4>Supported Methods:</h4>
+      <ul>
+        ${server.validMethods.map(m => `<li>${m}</li>`).join('\n        ')}
+      </ul>
+      <h4>Supported Protocols:</h4>
+      <ul>
+        ${server.validProtocols.map(p => `<li>${p}</li>`).join('\n        ')}
+      </ul>
+    </div>
+  `;
+
+  const body = httpResponse.htmlTemplate('501 Not Implemented', mainContent);
+  const contentLength = getByteLength(body); 
+
+  return (
+    'HTTP/1.1 501 Not Implemented\r\n' +
+    'Content-Type: text/html; charset=utf-8\r\n' +
+    `Content-Length: ${contentLength}\r\n` +
+    'Connection: close\r\n' +
+    '\r\n' +
+    body
+  );
+};
+
 class HttpParseError extends Error {}
 class HttpNotImplemented extends Error {}
 
@@ -296,22 +442,33 @@ server.onData = (conn) => {
     // TODO: Close gracefully, log.
   }
 
-
-  console.log(JSON.stringify(req, null, 2));
-
+ // console.log(JSON.stringify(req, null, 2));
+try {
+  
   if (conn.buffer.includes('\r\n\r\n')) {
-    const response =
-      'HTTP/1.1 200 OK\r\n' +
-      'Content-Type: text/plain\r\n' +
-      'Content-Length: 13\r\n' +
-      'Connection: close\r\n' +
-      '\r\n' +
-      'Hello, World!';
+    let response = '';
 
+    if (req.hasError) {
+      if (req.error.httpCode === 400) {
+        response = httpResponse.generate400(req.error.errorMsg);
+      } else if (req.error.httpCode === 501) {
+        response = httpResponse.generate501(req.error.errorMsg);
+      } else {
+        // Fallback to 400 for unknown errors
+        response = httpResponse.generate400(req.error.errorMsg);
+      }
+    } else {
+      response = httpResponse.generate200();
+    }
+
+    console.log("Sending response...");
     conn.write(response);
     conn.buffer = '';
     server.closeConnection(conn);
   }
+} catch(err) {
+  console.log("wtf:" + err);
+}
 };
 
 server.onClose = (conn) => {
